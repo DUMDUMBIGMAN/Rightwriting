@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Smart Pen Overlay</title>
+    <style>
+        body { 
+            background: #0f0f12; 
+            color: #00ffc8; 
+            font-family: 'Courier New', monospace; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            height: 100vh; 
+            margin: 0; 
+        }
+        
+        #setup-area {
+            text-align: center;
+            padding: 20px;
+            border: 1px solid #333;
+            border-radius: 12px;
+            background: #16161a;
+        }
+
+        button { 
+            background: #00ffc8; 
+            color: #0f0f12; 
+            border: none; 
+            padding: 15px 30px; 
+            font-weight: bold; 
+            border-radius: 8px; 
+            cursor: pointer; 
+            font-size: 1.1rem;
+            margin: 10px;
+        }
+
+        button:hover { background: #00cc9f; }
+
+        /* Styles for the Widget when it's inside the PiP window */
+        #widget {
+            width: 100%;
+            height: 100%;
+            background: #0f0f12;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+
+        #label { 
+            font-size: 1.5rem; 
+            color: #fff; 
+            text-shadow: 0 0 10px #00ffc8; 
+            margin-bottom: 5px;
+        }
+
+        #canvas { 
+            background: #16161a; 
+            border-radius: 8px; 
+            border: 1px solid #333;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="setup-area">
+        <h1>Smart Pen Hub</h1>
+        <p>1. Connect your pen via Bluetooth/Serial</p>
+        <button id="connectBtn">1. CONNECT PEN</button>
+        <p>2. Pop out the visualizer</p>
+        <button id="pipBtn">2. OPEN FLOATING WINDOW</button>
+        <div id="status">Status: Offline</div>
+    </div>
+
+    <div id="widget-container" style="display: none;">
+        <div id="widget">
+            <div id="label">READY</div>
+            <canvas id="canvas" width="280" height="180"></canvas>
+            <div style="font-size: 10px; color: #555; margin-top: 5px;">SMART PEN V1.0</div>
+        </div>
+    </div>
+
+    <script>
+        const connectBtn = document.getElementById('connectBtn');
+        const pipBtn = document.getElementById('pipBtn');
+        const status = document.getElementById('status');
+        const widget = document.getElementById('widget');
+        
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const label = document.getElementById('label');
+
+        let isRecording = false;
+        let currentPath = [];
+        let pos = { x: 140, y: 90 };
+        let vel = { x: 0, y: 0 };
+        const SENSITIVITY = 0.04; 
+        const FRICTION = 0.55;
+
+        // 1. SERIAL CONNECTION
+        async function connect() {
+            try {
+                const port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                status.innerText = "Status: Connected!";
+                readLoop(port);
+            } catch (e) {
+                status.innerText = "Error: " + e.message;
+            }
+        }
+
+        // 2. PiP LOGIC
+        async function openPiP() {
+            if (!('documentPictureInPicture' in window)) {
+                alert("PiP not supported in this browser. Use Chrome/Edge.");
+                return;
+            }
+
+            const pipWindow = await window.documentPictureInPicture.requestWindow({
+                width: 300,
+                height: 250,
+            });
+
+            // Move the widget into the PiP window
+            pipWindow.document.body.append(widget);
+
+            // Copy styles so it looks the same
+            [...document.styleSheets].forEach((styleSheet) => {
+                const style = document.createElement('style');
+                try {
+                    style.textContent = [...styleSheet.cssRules].map((rule) => rule.cssText).join('');
+                    pipWindow.document.head.append(style);
+                } catch (e) {}
+            });
+
+            // When PiP closes, move widget back to main page (hidden)
+            pipWindow.addEventListener("pagehide", () => {
+                document.getElementById('widget-container').append(widget);
+            });
+        }
+
+        async function readLoop(port) {
+            const textDecoder = new TextDecoderStream();
+            port.readable.pipeTo(textDecoder.writable);
+            const reader = textDecoder.readable.getReader();
+            let buffer = "";
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buffer += value;
+                let lines = buffer.split("\n");
+                buffer = lines.pop();
+                for (let line of lines) { handleSerialData(line.trim()); }
+            }
+        }
+
+        function handleSerialData(data) {
+            if (data === "START") {
+                isRecording = true;
+                currentPath = [];
+                vel = { x: 0, y: 0 };
+                pos = { x: 140, y: 90 };
+                label.innerText = "DRAWING...";
+            } else if (data === "END") {
+                isRecording = false;
+                setTimeout(() => { if(!isRecording) label.innerText = "READY"; }, 1500);
+            } else if (data.startsWith("AI:")) {
+                label.innerText = data;
+            } else if (data.includes(",") && isRecording) {
+                const [ax, ay] = data.split(",").map(Number);
+                vel.x += ax * SENSITIVITY;
+                vel.y += ay * SENSITIVITY;
+                pos.x += vel.x;
+                pos.y += vel.y;
+                vel.x *= FRICTION;
+                vel.y *= FRICTION;
+                
+                // Boundaries
+                pos.x = Math.max(0, Math.min(280, pos.x));
+                pos.y = Math.max(0, Math.min(180, pos.y));
+
+                currentPath.push({ x: pos.x, y: pos.y });
+                draw();
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, 280, 180);
+            ctx.strokeStyle = "#00ffc8";
+            ctx.lineWidth = 3;
+            ctx.lineCap = "round";
+            ctx.shadowBlur = 5;
+            ctx.shadowColor = "#00ffc8";
+
+            if (currentPath.length < 2) return;
+            ctx.beginPath();
+            ctx.moveTo(currentPath[0].x, currentPath[0].y);
+            for (let i = 1; i < currentPath.length; i++) {
+                ctx.lineTo(currentPath[i].x, currentPath[i].y);
+            }
+            ctx.stroke();
+        }
+
+        connectBtn.addEventListener('click', connect);
+        pipBtn.addEventListener('click', openPiP);
+    </script>
+</body>
+</html>
